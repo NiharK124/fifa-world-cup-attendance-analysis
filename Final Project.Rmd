@@ -1,0 +1,306 @@
+---
+title: "Climate Vs Attendance: Analyzing FIFA World Cup Attendance"
+author: "Nihar Khadawala"
+output: html_document
+date: "2026-05-10"
+---
+
+## Introduction
+
+The FIFA World Cup is the most watched sporting event on the planet, held every four years in a different host country. Since the 2026 World Cup is upcoming this summer, I was curious to explore if the weather at the World Cup has any correlation with stadium attendance. While factors such as host nation and stadium capacity affect attendance, this project shifts the view and investigates a more overlooked factor: The role of climate and its relationship to spectator attendance. Additionally, I explore whether the time of year a tournament is held has any relationship with attendance. 
+
+To examine these questions, I used two datasets. The first dataset shows average attendance per game and total attendance from every world cup from 1930 to 2018, sourced from Statista. The second dataset comes from a Reuters article published by Yahoo Sports, which describes the general weather conditions for each tournament. 
+
+Dataset Links
+Statista: https://www.statista.com/statistics/264441/number-of-spectators-at-football-world-cups-since-1930/
+
+Reuters: https://sports.yahoo.com/soccer-dates-weather-previous-world-cups-130013936--sow.html
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)  
+library(rvest)       
+library(ggbeeswarm)
+```
+
+## Data Source 1: Statista Attendance Figures
+
+The Statista dataset contains total and average per-game attendance for all 21 World Cups held between 1930 and 2018. When I tried to download the data, I ran into a paywall. Fortunately, I could view the entire dataset, but just couldn't download it. To work around this, I manually entered every data point and constructed a tibble. 
+
+```{r statista data}
+attendance <- tibble(
+  year = c(2018, 2014, 2010, 2006, 2002, 1998, 1994, 1990, 1986,
+            1982, 1978, 1974, 1970, 1966, 1962, 1958, 1954, 1950,
+            1938, 1934, 1930),
+  host = c("Russia", "Brazil", "South Africa", "Germany",
+            "Japan / South Korea", "France", "USA", "Italy", "Mexico",
+            "Spain", "Argentina", "Germany", "Mexico", "England",
+            "Chile", "Sweden", "Switzerland", "Brazil", "France",
+            "Italy", "Uruguay"),
+  total_attendance = c(3031768, 3441450, 3167984, 3367000, 2724604,
+                       2859234, 3568567, 2527348, 2407431, 1856277,
+                       1610215, 1774022, 1673975, 1614677, 776000,
+                       868000, 943000, 1337000, 483000, 395000, 434000),
+  avg_attendance   = c(47371, 53772, 49499, 52609, 42571, 44676,
+                       68626, 48411, 46297, 35698, 42374, 46685,
+                       52312, 50459, 24250, 24800, 36269, 60773,
+                       26833, 23235, 24139)
+)
+```
+
+It is worth noting that the number of games played has changed significantly over
+the tournament's history. Early World Cups had far fewer teams and matches, so total attendance figures should not be compared. For that reason, **average attendance per game** is more compelling and will be the more reliable metric used for comparison throughout this report. Shown below is the attendance data for every World Cup from 1930 to 2018. 
+
+### Attendance Over Time
+
+```{r attendance table}
+attendance |>
+  arrange(year) |>
+  rename(
+    Year                      = year,
+    Host                      = host,
+    `Total Attendance`        = total_attendance,
+    `Avg Attendance per Game` = avg_attendance
+  ) |>
+  print(n = Inf)
+```
+
+Next, I wanted to see the overall trend for the average attendance per game over time.
+
+```{r attendance plot}
+attendance |>
+  ggplot(aes(year, avg_attendance)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_point(color = "blue", size = 2.5) +
+  scale_x_continuous(breaks = attendance$year) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title    = "Average Attendance per Game at FIFA World Cups (1930–2018)",
+    x        = "Year",
+    y        = "Average Attendance per Game",
+  ) +
+  theme_bw() +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The plot reveals some notable patterns. Attendance was lower in the earlier tournaments, then peaked sharply in 1950 in Brazil and again in 1994 in the United States. Since then, attendance has remained stable around the 45,000-55,000 range. I also noticed that the 1942 and 1946 World Cups were missing. After some research, I learned that these tournaments were cancelled due to World War II. The lowest average attendance occured in 1962 in Chile, while the highest was in 1994 in the United States. This raised eyebrows, so I did further research. I discovered that the United States had utilized its massive football stadiums in 1994, thus resulting in a record attendance rate. In contrast, a 9.5 magnitude earthquake in Chile in 1960 had destroyed infrastructure, leading to a very low average attendance. 
+
+Sources:
+https://www.foxsports.com/stories/soccer/1994-world-cup-united-states-history-host
+https://en.wikipedia.org/wiki/1962_FIFA_World_Cup
+
+## Data Source 2: Weather and Tournament Dates (Reuters / Yahoo Sports)
+
+The Reuters article provides the start and end dates and a brief weather description for each World Cup from 1930 to 2010. Unlike the Statista data, this information required web scraping and cleaning.
+
+Before scraping, I confirmed that the site permitted web scraping.
+
+```{r scraping permission, echo=TRUE}
+url <- "https://sports.yahoo.com/soccer-dates-weather-previous-world-cups-130013936--sow.html"
+robotstxt::paths_allowed(url)
+```
+
+With permission confirmed, I read the page using `read_html()` and extracted all
+paragraph text using `html_elements("p")` followed by `html_text2()`.
+
+```{r scrape reuters, cache=TRUE}
+page <- read_html(url)
+
+raw_paragraphs <- page |>
+  html_elements("p") |>
+  html_text2()
+```
+
+The article is written in one continuous paragraph, which was challenging to parse because there were no line breaks separating individual tournament entries. The article contained no separators between tournament entries, and each one followed the format shown below:
+
+```
+1930 Uruguay July 13-July 30 Warm wintry weather
+1934 Italy May 27-June 10 Warm and sunny most of time
+```
+---
+
+## Cleaning the Weather Data
+
+To parse this, I isolated each tournament, inserted a separator `|` before each year, split the text, and extracted the year, start month, and weather description.
+
+```{r isolate lines}
+article_text <- raw_paragraphs[[2]]
+
+data_section <- article_text |>
+  str_extract("Dates and overall weather at previous finals: .+")
+
+weather_lines <- data_section |>
+  str_replace_all("(\\d{4} )", "|\\1") |>
+  str_split("\\|") |>
+  _[[1]] |>
+  str_subset("^\\d{4}")
+```
+
+```{r clean weather fields}
+weather <- tibble(line = weather_lines) |>
+  mutate(
+    year = str_extract(line, "^\\d{4}") |> as.integer(),
+
+    start_month = str_extract(line, "[A-Z][a-z]+ \\d") |>
+                    str_remove(" \\d"),
+    
+    weather = str_replace(
+                line,
+                "^\\d{4}\\s+[\\w/. ]+?\\s+[A-Z][a-z]+ \\d{1,2}-[A-Z][a-z]+ \\d{1,2}\\s+",
+                ""
+              ) |>
+              str_trim()
+  ) |>
+  select(year, start_month, weather)
+```
+
+```{r month to numeric}
+weather <- weather |>
+  mutate(month_num = match(start_month, month.name))
+```
+
+The cleaned weather table contains 19 rows, one for each World Cup covered by the article. The 2014 and 2018 tournaments were not mentioned in the article, and thus are not in the table.
+```{r weather table}
+weather |>
+  arrange(year) |>
+  rename(
+    Year                  = year,
+    `Start Month`         = start_month,
+    `Month Number`        = month_num,
+    `Weather Description` = weather
+  ) |>
+  print(n = Inf)
+```
+
+## Merging the Datasets
+
+Since both tibbles share a `year` column, I merged them using left_join(), keeping all 21 rows from the attendance data. The 2014 and 2018 entries have NA for its weather-related columns. 
+
+```{r join data}
+world_cup <- attendance |>
+  left_join(weather, by = "year")
+```
+
+## Saving a Tidy CSV
+
+As required, I saved a tidy version of the merged dataset as a CSV file. This
+provides a clean starting point for anyone wishing to continue the analysis without
+re-running the scraping and parsing steps.
+
+```{r save csv}
+world_cup |>
+  write_csv("world_cup_tidy.csv")
+```
+
+## Analysis
+
+### Weather Categories and Attendance
+
+In the article, the weather descriptions are not categorized but they follow recognizable patterns. Using `str_detect()` and `case_when()`, I assigned each tournament to one of three categories: *Cold / Wet*, *Variable*, or *Hot / Sunny*.
+
+```{r weather category}
+world_cup <- world_cup |>
+  mutate(
+    weather_category = case_when(
+      str_detect(weather, regex("cold|rain|wintry|wet", ignore_case = TRUE))
+        ~ "Cold / Wet",
+      str_detect(weather, regex("changeable|variable|humid", ignore_case = TRUE))
+        ~ "Variable",
+      str_detect(weather, regex("hot|sunny|warm|pleasant", ignore_case = TRUE))
+        ~ "Hot / Sunny",
+      !is.na(weather) ~ "Other",
+      TRUE            ~ NA_character_
+    )
+  )
+```
+
+Next, I generated a boxplot showing how average attendance per game is distributed among the three weather categories. We can use this to compare whether different climate conditions are associated with attendance level.
+
+```{r weather boxplot}
+world_cup |>
+  filter(!is.na(weather_category)) |>
+  ggplot(aes(weather_category, avg_attendance,
+             group = weather_category, fill = weather_category)) +
+  geom_boxplot() +
+  geom_beeswarm() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  ylab("Average Attendance per Game") +
+  xlab("Weather Category") +
+  ggtitle("Average Attendance per Game by Weather Category") +
+  theme_bw()
+```
+
+Looking closely at the boxplot, we can see that the Hot / Sunny category has the highest median (approx 46,000). Cold / Wet has a slightly lower median (approx 44,000), and Variable weather has the lowest median (approx 39,000). We notice that warmer weather correlates to a small increase in attendance, in comparison to the other climate types. However, all three categories show considerable overlap, making it difficult to conclude that weather solely affects attendance. 
+
+
+Alongside the boxplot, I created a summary table based on weather. This table gives numerical values of the number of tournaments in each weather category along with the mean and median average attendance per game for each group. 
+```{r weather summary table}
+world_cup |>
+  filter(!is.na(weather_category)) |>
+  group_by(weather_category) |>
+  summarize(
+    n              = n(),
+    mean_avg_att   = round(mean(avg_attendance)),
+    median_avg_att = round(median(avg_attendance)),
+    .groups = "drop"
+  ) |>
+  rename(
+    `Weather Category`      = weather_category,
+    `N Tournaments`         = n,
+    `Mean Avg Attendance`   = mean_avg_att,
+    `Median Avg Attendance` = median_avg_att
+  )
+```
+
+These numbers follow what we found in the boxplot. While the boxplot shows the overall distribution, the summary table provides the exact numerical values in order for us to make better comparisons. The mean attendance for warmer weather is the largest, followed by cooler and variable weather. We should also note that our sample size of just 19 tournaments is too little to make much of a definitive conclusion. The more tournament data we have, we can make much more reliable inferences.
+
+### Tournament Timing and Attendance
+
+To shift perspective, I was wondering whether the month of tournament start times correlate to attendance. All World Cups have started in May, June, or July. Even within that narrow window, there is reason to wonder whether the specific start month has any relationship with attendance. The plot below shows average per-game attendance against the start month for the 19 tournaments covered by the Reuters data.
+
+```{r timing plot}
+world_cup |>
+  filter(!is.na(month_num)) |>
+  ggplot(aes(month_num, avg_attendance)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(breaks = 5:7,
+                     labels = c("May", "June", "July")) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  ylab("Average Attendance per Game") +
+  xlab("Start Month") +
+  ggtitle("Tournament Start Month vs. Average Attendance per Game") +
+  theme_bw()
+```
+
+The trend line shows a slight positive relationship, meaning that tournaments starting later in the summer tend to have somewhat higher average attendance. It seems as if this line is almost horizontal, which leads us to believe that any correlation between Start Month and Average Attendance is due to noise, rather than a true relationship. However, to prove this even further, a linear regression model will give us more insight. 
+
+```{r regression}
+lm_fit <- world_cup |>
+  filter(!is.na(month_num)) |>
+  lm(avg_attendance ~ month_num, data = _)
+
+summary(lm_fit)
+```
+These summary statistics give us valuable information regarding correlation, if any. The p-value of 0.7234 is greater than 0.05, indicating that this relationship is not statistically significant. Additionally, the R-squared value of 0.00756 indicates that start month explains less than 1% of the variation in attendance.
+
+## Conclusion
+
+This investigation to determine whether climate or month had any effect on stadium attendance yielded several insights. While not the primary factor, we found that weather does show a slight correlation with attendance, particularly in warmer climates. Hot and sunny weather tends to drive a little more crowds than tournaments held in cold, wet, or variable conditions. In contrast, we found that tournament start dates do not have much of a correlation with attendance, as proved with our regression test, which was not statistically significant. In summary, spectator turnout has many factors associated with it, and cannot be pinpointed to just weather or timings. As we saw, stadium capacity drives attendance rates (such as NFL stadiums being used in 1994), whereas natural disasters, such as the Chile earthquake, negatively impact attendance. 
+
+In the future, this project can be expanded upon. Future research could incorporate additional variables such as host country GDP, population, or ticket prices. With more variables, we can use an econometric approach and perform a multiple regression test. By doing so, we will be able to control our variables and see how each variable impacts attendance rate. Lastly, We will also be able to limit the variability from confounding variables.
+
+## Appendix: AI Tools Used
+
+AI was used for the following tasks:
+
+String Delimitation Prompt: "How do I insert a separator before every 4 digit year contained in a long string, so I can split them individually?"
+AI suggested using str_replace_all() and inserting a `|` before each year, then str_split() for individual rows. 
+
+Converting Month Names to Numerical values Prompt: "Is there a easier way to convert month names into their corresponding numerical values, other than manually setting each month equal to a number."
+AI suggested that R has a built-in-vector of month names, and it can be done using tidyverse logic. AI proposed that I can use match() against month.name all within a mutate() call. 
+
+Note: The linear regression was done by me, although it was not covered in this course. I had learned this first in Data 101, and again in Econometrics. 
+
+
